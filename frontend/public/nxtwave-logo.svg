@@ -1,0 +1,30 @@
+<svg width="280" height="50" viewBox="0 0 280 50" xmlns="http://www.w3.org/2000/svg">
+  <!-- Shield Logo with NIAT -->
+  <g>
+    <!-- Shield shape - divided into 4 quadrants -->
+    <path d="M 5 5 L 5 20 L 20 20 L 20 5 Z" fill="#A12828"/>
+    <path d="M 20 5 L 20 20 L 35 20 L 35 5 Z" fill="#FFFFFF"/>
+    <path d="M 5 20 L 20 20 L 20 35 L 12.5 38 L 5 35 Z" fill="#A12828"/>
+    <path d="M 20 20 L 35 20 L 35 35 L 27.5 38 L 20 35 Z" fill="#FFFFFF"/>
+    
+    <!-- Shield border -->
+    <path d="M 5 5 L 20 5 L 35 5 L 35 20 L 35 35 L 27.5 38 L 20 35 L 12.5 38 L 5 35 L 5 20 Z" 
+          fill="none" stroke="#A12828" stroke-width="0.5"/>
+    
+    <!-- Letter N - top left (white on red) -->
+    <text x="8" y="15" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#FFFFFF">N</text>
+    
+    <!-- Letter I - top right (red on white) -->
+    <text x="23" y="15" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#A12828">I</text>
+    
+    <!-- Letter A - bottom left (white on red) -->
+    <text x="8" y="30" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#FFFFFF">A</text>
+    
+    <!-- Letter T - bottom right (red on white) -->
+    <text x="23" y="30" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#A12828">T</text>
+  </g>
+  
+  <!-- Company Name -->
+  <text x="45" y="18" font-family="Arial, sans-serif" font-size="11" font-weight="600" fill="#A12828">NxtWave Institute of</text>
+  <text x="45" y="32" font-family="Arial, sans-serif" font-size="11" font-weight="600" fill="#A12828">Advanced Technologies</text>
+</svg>
