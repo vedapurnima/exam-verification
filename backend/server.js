@@ -152,9 +152,13 @@ let serviceAccountEmail = '';
 if (!fs.existsSync(credentialsPath)) {
   initializationError = new Error(
     `Google service account credentials not found at ${credentialsPath}. ` +
-      'Ensure the credentials.json file exists or set GOOGLE_APPLICATION_CREDENTIALS.'
+      'Ensure the examCredits.json file exists in Render Secret Files (/etc/secrets/examCredits.json) or set GOOGLE_APPLICATION_CREDENTIALS environment variable.'
   );
   console.error(`❌ ${initializationError.message}`);
+  console.error(`❌ Checked paths:`);
+  console.error(`   - /etc/secrets/examCredits.json (Render Secret Files)`);
+  console.error(`   - ${path.join(process.cwd(), 'examCredits.json')} (App root)`);
+  console.error(`   - ${path.join(__dirname, 'examCredits.json')} (Backend directory)`);
 } else {
   try {
     const credentialsContent = fs.readFileSync(credentialsPath, 'utf8').trim();
@@ -514,29 +518,53 @@ app.get('/student', async (req, res) => {
       message: errorMessage,
       code: error.code,
       mobileNo: mobileNo?.trim(),
-      stack: error.stack
+      stack: error.stack,
+      errorType: error.constructor.name
     });
+    
+    // Check for credential errors
+    if (error.code === 'INVALID_CREDENTIALS' || initializationError) {
+      return res.status(500).json({ 
+        error: 'Credentials Error',
+        message: initializationError?.message || 'Google Sheets credentials are missing or invalid.',
+        details: 'Please ensure examCredits.json is properly configured in Render Secret Files at /etc/secrets/examCredits.json',
+        troubleshooting: [
+          'Check that examCredits.json exists in Render Secret Files',
+          'Verify the file path: /etc/secrets/examCredits.json',
+          'Ensure the credentials file contains valid JSON with client_email and private_key'
+        ]
+      });
+    }
     
     // Return specific error messages based on error type
     if (error.code === 403) {
       return res.status(403).json({ 
         error: 'Permission denied',
         message: 'Could not access Google Sheets. Please ensure the sheet is shared with the service account email.',
-        details: errorMessage
+        details: errorMessage,
+        serviceAccountEmail: serviceAccountEmail || 'Not available'
       });
     }
     if (error.code === 404) {
       return res.status(404).json({ 
         error: 'Sheet not found',
         message: 'The Google Sheet could not be found. Please check the Sheet ID.',
-        details: errorMessage
+        details: errorMessage,
+        sheetId: SHEET_ID
       });
     }
     
     return res.status(500).json({ 
       error: 'Failed to fetch student data',
       message: 'Could not connect to Google Sheets. Please check your connection and credentials.',
-      details: errorMessage
+      details: errorMessage,
+      errorCode: error.code || 'UNKNOWN',
+      troubleshooting: [
+        'Check Render logs for detailed error information',
+        'Verify examCredits.json is in Render Secret Files',
+        'Ensure the Google Sheet is shared with the service account',
+        'Check that the Sheet ID is correct'
+      ]
     });
   }
 });
@@ -1120,10 +1148,11 @@ async function testConnection() {
     console.error('   Error:', getErrorMessage(error));
     console.error('   Code:', error.code);
     console.error('\n📋 Troubleshooting steps:');
-    console.error('   1. Ensure credentials.json is in the backend folder');
+    console.error('   1. Ensure examCredits.json is in Render Secret Files (/etc/secrets/examCredits.json)');
     console.error('   2. Verify the Google Sheet ID is correct:', SHEET_ID);
     console.error('   3. Share the Google Sheet with the service account email (check console above)');
     console.error('   4. Ensure the service account has Editor access');
+    console.error('   5. Check Render logs for credential file path information');
     console.error('\n⚠️  Server will start, but API calls may fail until connection is fixed.\n');
   }
 }
