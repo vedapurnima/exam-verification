@@ -15,7 +15,8 @@ const port = process.env.PORT || 4001;
 const allowedOrigins = [
   'https://exam-verification.vercel.app',
   'http://localhost:5173', // Vite dev server
-  'http://localhost:3000', // Alternative dev port
+  'http://localhost:3000',
+  'http://localhost:4001', // Alternative dev port
 ];
 
 app.use(
