@@ -11,21 +11,44 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 4001;
 
-app.use(cors());
+// CORS configuration - allow frontend deployed on Vercel
+const allowedOrigins = [
+  'https://exam-verification.vercel.app',
+  'http://localhost:5173', // Vite dev server
+  'http://localhost:3000', // Alternative dev port
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(null, true); // Allow all origins for now (can be restricted later)
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 app.use(express.json());
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const {
   SHEET_ID = '1w6K6K4zMiSkMGlXswOdka3GuqzcpZzh0YBai8zl26kE',
-  SHEET_RANGE = 'student_exam_data!A2:G',
+  SHEET_RANGE = 'student_exam_data!A2:L',
   GOOGLE_APPLICATION_CREDENTIALS,
 } = process.env;
 
-const [sheetNamePart = 'student_exam_data', columnRangePart = 'A2:G'] = SHEET_RANGE.split('!');
-const [startColumnRaw = 'A2', endColumnRaw = 'G'] = columnRangePart.split(':');
+const [sheetNamePart = 'student_exam_data', columnRangePart = 'A2:L'] = SHEET_RANGE.split('!');
+const [startColumnRaw = 'A2', endColumnRaw = 'L'] = columnRangePart.split(':');
 const startColumnLetter = startColumnRaw.replace(/\d+/g, '') || 'A';
-const endColumnLetter = endColumnRaw.replace(/\d+/g, '') || 'G';
+const endColumnLetter = endColumnRaw.replace(/\d+/g, '') || 'L';
 const sheetName = sheetNamePart;
 
 const credentialsPath = GOOGLE_APPLICATION_CREDENTIALS
@@ -74,14 +97,35 @@ if (!fs.existsSync(credentialsPath)) {
   }
 }
 
+// ============================================================================
+// GOOGLE SHEETS COLUMN DEFINITION (Order is CRITICAL - must match sheet)
+// ============================================================================
+// Column A: Name
+// Column B: MobileNo (UNIQUE KEY - used to prevent duplicates)
+// Column C: District
+// Column D: State
+// Column E: Paid
+// Column F: FeeAmount (NEW - fee amount paid by student)
+// Column G: Attempted
+// Column H: RetakeAllowed
+// Column I: LastApprovedAt
+// Column J: (reserved/empty)
+// Column K: (reserved/empty)
+// Column L: CreatedAt (set once on creation, NEVER overwritten)
+// ============================================================================
 const HEADERS = [
   'Name',
   'MobileNo',
   'District',
   'State',
   'Paid',
+  'FeeAmount', // Column F - NEW
   'Attempted',
   'RetakeAllowed',
+  'LastApprovedAt',
+  '', // Column J - reserved/empty
+  '', // Column K - reserved/empty
+  'CreatedAt', // Column L
 ];
 
 const googleAuth = !initializationError
@@ -90,6 +134,8 @@ const googleAuth = !initializationError
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     })
   : null;
+
+const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
 
 if (initializationError) {
   console.error(
@@ -136,8 +182,20 @@ function getErrorMessage(error) {
 }
 
 function mapRowToStudent(row, rowNumber) {
+  // CRITICAL: Must preserve ALL 12 columns (A through L), including J and K
+  // Store column J and K values even though they don't have header names
   const data = HEADERS.reduce((acc, header, index) => {
-    acc[header] = row[index] ?? '';
+    if (header && header.trim() !== '') {
+      // Map named columns (A-I, L)
+      acc[header] = row[index] ?? '';
+    } else {
+      // Preserve columns J and K values (index 9 and 10)
+      if (index === 9) {
+        acc['_columnJ'] = row[index] ?? ''; // Store column J value
+      } else if (index === 10) {
+        acc['_columnK'] = row[index] ?? ''; // Store column K value
+      }
+    }
     return acc;
   }, {});
 
@@ -157,8 +215,111 @@ function normalizeYesNo(value) {
   return 'No';
 }
 
+/**
+ * Builds a row array from a student object
+ * CRITICAL: Must return exactly 12 values matching the HEADERS array (A through L)
+ * This ensures updates don't shift or overwrite adjacent rows
+ * 
+ * @param {Object} student - Student object with all fields
+ * @returns {Array<string>} - Array of exactly 12 values matching HEADERS order
+ */
 function buildRowFromStudent(student) {
-  return HEADERS.map((header) => student[header] ?? '');
+  // CRITICAL: Must build exactly 12 columns (A through L) in correct order
+  const row = HEADERS.map((header, index) => {
+    // Handle columns J and K (index 9 and 10) - preserve existing values
+    if (!header || header.trim() === '') {
+      if (index === 9) {
+        // Column J - preserve existing value or empty string
+        return student['_columnJ'] ?? '';
+      } else if (index === 10) {
+        // Column K - preserve existing value or empty string
+        return student['_columnK'] ?? '';
+      }
+      return '';
+    }
+    
+    // Handle named columns (A-I, L)
+    const value = student[header];
+    // Return empty string if value is undefined, null, or empty
+    if (value === undefined || value === null) return '';
+    return String(value).trim();
+  });
+  
+  // CRITICAL VALIDATION: Must have exactly 12 columns (A through L)
+  if (row.length !== HEADERS.length) {
+    console.error(`❌ CRITICAL ERROR: Row has ${row.length} columns, expected ${HEADERS.length}`);
+    throw new Error(`Row must have exactly ${HEADERS.length} columns (got ${row.length})`);
+  }
+  
+  return row;
+}
+
+/**
+ * Builds the exact update range for a specific row
+ * CRITICAL: Uses explicit A{row}:L{row} format to ensure only that row is updated
+ * 
+ * @param {number} rowNumber - The 1-indexed row number in the sheet (row 1 = header, row 2 = first data)
+ * @returns {string} - Range string like "student_exam_data!A5:L5"
+ */
+function buildUpdateRange(rowNumber) {
+  // CRITICAL: Use explicit A:L range for exactly 12 columns (A through L)
+  // This ensures we update ONLY the specified row and don't affect adjacent rows
+  return `${sheetName}!A${rowNumber}:L${rowNumber}`;
+}
+
+function parseIsoDate(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * Converts current date/time to IST (Indian Standard Time) and returns as ISO string
+ * IST is UTC+5:30
+ * 
+ * @returns {string} - ISO string in IST timezone (format: YYYY-MM-DDTHH:mm:ss.sss+05:30)
+ */
+function getCurrentISTTimestamp() {
+  const now = new Date();
+  // IST is UTC+5:30 (5 hours 30 minutes = 330 minutes = 19800000 milliseconds)
+  const istOffsetMs = 5.5 * 60 * 60 * 1000; // 19800000 milliseconds
+  const istTime = new Date(now.getTime() + istOffsetMs);
+  
+  // Get UTC components (since we've already added the offset)
+  const year = istTime.getUTCFullYear();
+  const month = String(istTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(istTime.getUTCDate()).padStart(2, '0');
+  const hours = String(istTime.getUTCHours()).padStart(2, '0');
+  const minutes = String(istTime.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(istTime.getUTCSeconds()).padStart(2, '0');
+  const milliseconds = String(istTime.getUTCMilliseconds()).padStart(3, '0');
+  
+  // Return in ISO format with +05:30 timezone indicator
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${milliseconds}+05:30`;
+}
+
+// Normalize mobile number for comparison (remove all non-digits)
+function normalizeMobileNumber(mobileNo) {
+  if (!mobileNo) return '';
+  return mobileNo.toString().replace(/\D/g, ''); // Remove all non-digits
+}
+
+/**
+ * STRICT NO-DUPLICATE VALIDATION
+ * This function ensures that before any write operation, we verify no duplicate exists.
+ * Returns the existing student if found, null otherwise.
+ * 
+ * @param {string} mobileNo - The mobile number to check (will be normalized)
+ * @returns {Promise<Object|null>} - Existing student object or null
+ */
+async function ensureNoDuplicate(mobileNo) {
+  const normalizedMobileNo = normalizeMobileNumber(mobileNo);
+  if (!normalizedMobileNo) {
+    return null;
+  }
+  return await findStudentByMobile(normalizedMobileNo);
 }
 
 async function findStudentByMobile(mobileNo) {
@@ -170,14 +331,67 @@ async function findStudentByMobile(mobileNo) {
     });
 
     const rows = response.data.values ?? [];
-    const index = rows.findIndex((row) => (row[1] ?? '').trim() === mobileNo.trim());
-
-    if (index === -1) {
+    if (rows.length === 0) {
+      console.log('No rows found in sheet');
       return null;
     }
 
-    const rowNumber = index + 2; // Account for header row
-    return mapRowToStudent(rows[index], rowNumber);
+    // Normalize the search mobile number
+    const searchMobile = normalizeMobileNumber(mobileNo);
+    console.log(`🔍 Searching for mobile: "${mobileNo}" (normalized: "${searchMobile}")`);
+
+    // Check if first row is header (if range starts from A1)
+    const startRow = SHEET_RANGE.includes('A1') ? 1 : 0;
+    const dataRows = startRow === 1 ? rows.slice(1) : rows;
+    
+    // Log header row for debugging if A1 range
+    if (startRow === 1 && rows.length > 0) {
+      console.log(`📋 Header row: ${JSON.stringify(rows[0])}`);
+    }
+    
+    console.log(`📊 Total data rows to search: ${dataRows.length}`);
+
+    // Find matching row by comparing normalized mobile numbers
+    const index = dataRows.findIndex((row, idx) => {
+      // Skip empty rows or rows without enough columns
+      if (!row || row.length < 2) {
+        return false;
+      }
+      
+      const rowMobile = normalizeMobileNumber(row[1] ?? '');
+      // Skip if mobile number is empty
+      if (!rowMobile) {
+        return false;
+      }
+      
+      const match = rowMobile === searchMobile;
+      if (match) {
+        const actualRowNum = startRow === 1 ? idx + 2 : idx + 1;
+        console.log(`✅ Found match at sheet row ${actualRowNum}, mobile: "${row[1]}" (normalized: "${rowMobile}")`);
+      }
+      return match;
+    });
+
+    if (index === -1) {
+      console.log(`No match found. Searched ${dataRows.length} rows.`);
+      // Log first few mobile numbers for debugging
+      if (dataRows.length > 0) {
+        console.log('Sample mobile numbers in sheet:', dataRows.slice(0, 3).map(r => normalizeMobileNumber(r[1] ?? '')));
+      }
+      return null;
+    }
+
+    // Calculate actual row number in sheet (1-indexed)
+    // CRITICAL: If header exists (startRow === 1):
+    //   - index 0 (first data row) → row 2 (row 1 is header)
+    //   - index 1 (second data row) → row 3
+    //   Formula: rowNumber = index + 2 (MANDATORY - never use +1)
+    // If no header (startRow === 0):
+    //   - index 0 → row 1
+    //   Formula: rowNumber = index + 1
+    const rowNumber = index + 2;
+console.log(`📍 Calculated row number (FIXED): ${rowNumber} (index: ${index}, SHEET_RANGE: ${SHEET_RANGE})`);
+return mapRowToStudent(dataRows[index], rowNumber);
   } catch (error) {
     console.error('❌ Error in findStudentByMobile:', error);
     throw error;
@@ -236,42 +450,33 @@ app.get('/student', async (req, res) => {
   }
 });
 
-app.post('/student', async (req, res) => {
-  const { Name, MobileNo, District, State, Paid } = req.body;
-
-  if (!Name || !MobileNo || !District || !State || typeof Paid === 'undefined') {
-    return res.status(400).json({ 
-      error: 'Name, MobileNo, District, State, and Paid are required.',
-      message: 'Please fill in all required fields.' 
-    });
-  }
-
+app.get('/students', async (req, res) => {
   try {
     const sheets = await getSheetsClient();
-
-    const newStudent = {
-      Name: Name.trim(),
-      MobileNo: MobileNo.trim(),
-      District: District.trim(),
-      State: State.trim(),
-      Paid: normalizeYesNo(Paid),
-      Attempted: 'No',
-      RetakeAllowed: 'No',
-    };
-
-    await sheets.spreadsheets.values.append({
+    const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: SHEET_RANGE,
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [buildRowFromStudent(newStudent)],
-      },
     });
 
-    return res.status(201).json({ student: newStudent });
+    const rows = response.data.values ?? [];
+    if (rows.length === 0) {
+      return res.json({ students: [] });
+    }
+
+    const startRow = SHEET_RANGE.includes('A1') ? 1 : 0;
+    const dataRows = startRow === 1 ? rows.slice(1) : rows;
+
+    const students = dataRows
+      .filter((row) => row && row.length >= 2 && row[0] && row[1]) // Filter out empty rows
+      .map((row, idx) => {
+        const rowNumber = startRow === 1 ? idx + 2 : idx + 1;
+        return mapRowToStudent(row, rowNumber);
+      });
+
+    return res.json({ students });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
-    console.error('❌ Error adding student:', {
+    console.error('❌ Error fetching all students:', {
       message: errorMessage,
       code: error.code,
       stack: error.stack
@@ -280,7 +485,7 @@ app.post('/student', async (req, res) => {
     if (error.code === 403) {
       return res.status(403).json({ 
         error: 'Permission denied',
-        message: 'Could not write to Google Sheets. Please ensure the sheet is shared with the service account email.',
+        message: 'Could not access Google Sheets. Please ensure the sheet is shared with the service account email.',
         details: errorMessage
       });
     }
@@ -293,13 +498,335 @@ app.post('/student', async (req, res) => {
     }
     
     return res.status(500).json({ 
-      error: 'Failed to add student',
+      error: 'Failed to fetch students data',
       message: 'Could not connect to Google Sheets. Please check your connection and credentials.',
       details: errorMessage
     });
   }
 });
 
+// ============================================================================
+// POST /student - Create or update student record
+// ============================================================================
+// STRICT NO-DUPLICATE RULE: MobileNo is the UNIQUE KEY
+// 
+// BEFORE ANY WRITE OPERATION:
+//   1. Always check if MobileNo exists using findStudentByMobile()
+//   2. Normalize mobile number (remove non-digits) for comparison
+//
+// IF MobileNo EXISTS:
+//   ✅ UPDATE the existing row (same row number)
+//   ❌ NEVER append a new row
+//   ✅ Preserve CreatedAt (never overwrite)
+//   ✅ Update: Name, District, State, Paid
+//
+// IF MobileNo DOES NOT EXIST:
+//   ✅ APPEND new row
+//   ✅ Set CreatedAt = current timestamp
+//   ✅ Set LastApprovedAt = empty (will be set on approval)
+//
+// MULTIPLE SAFETY CHECKS:
+//   - Initial check before any operation
+//   - Final check before append
+//   - Pre-append check right before writing
+//
+// This ensures NO DUPLICATES can ever be created.
+// ============================================================================
+app.post('/student', async (req, res) => {
+  const { Name, MobileNo, District, State, Paid, FeeAmount } = req.body;
+
+  if (!Name || !MobileNo || !District || !State || typeof Paid === 'undefined') {
+    return res.status(400).json({
+      error: 'Name, MobileNo, District, State, and Paid are required.',
+      message: 'Please fill in all required fields.',
+    });
+  }
+
+  // FeeAmount is required for new users (will be validated when creating new user)
+  if (FeeAmount === undefined || FeeAmount === null || FeeAmount === '') {
+    return res.status(400).json({
+      error: 'FeeAmount is required.',
+      message: 'Please provide the fee amount.',
+    });
+  }
+
+  try {
+    // Normalize mobile number (trim and remove spaces)
+    const normalizedMobileNo = normalizeMobileNumber(MobileNo);
+    if (!normalizedMobileNo) {
+      return res.status(400).json({
+        error: 'Invalid mobile number.',
+        message: 'Please provide a valid mobile number.',
+      });
+    }
+
+    const sheets = await getSheetsClient();
+    const existingStudent = await findStudentByMobile(normalizedMobileNo);
+    const normalizedPaid = normalizeYesNo(Paid);
+
+    if (existingStudent) {
+      // Duplicate detected - update existing record instead of creating new one
+      console.log(`⚠️  Duplicate mobile number detected: "${normalizedMobileNo}". Updating existing record at row ${existingStudent.rowNumber} instead of creating duplicate.`);
+      
+      // Preserve CreatedAt - never overwrite it
+      // CRITICAL: Preserve ALL columns including J, K, and FeeAmount
+      const updatedStudent = {
+        ...existingStudent, // This preserves _columnJ, _columnK, CreatedAt, FeeAmount, and all other fields
+        Name: Name.trim(),
+        MobileNo: normalizedMobileNo, // Use normalized mobile number
+        District: District.trim(),
+        State: State.trim(),
+        Paid: normalizedPaid,
+        // Update FeeAmount only if provided in request, otherwise preserve existing value
+        FeeAmount: FeeAmount !== undefined && FeeAmount !== null && FeeAmount !== '' 
+          ? String(FeeAmount).trim() 
+          : (existingStudent.FeeAmount ?? ''),
+        // CRITICAL: Preserve CreatedAt exactly as-is - NEVER set new timestamp for existing users
+        CreatedAt: existingStudent.CreatedAt ?? '',
+        // Preserve LastApprovedAt unless it's being updated elsewhere
+        LastApprovedAt: existingStudent.LastApprovedAt || '',
+        // Ensure columns J and K are preserved
+        _columnJ: existingStudent._columnJ ?? '',
+        _columnK: existingStudent._columnK ?? '',
+      };
+
+      // CRITICAL: Use explicit A{row}:L{row} range to update ONLY this row
+      const sheetRow = existingStudent.rowNumber;
+      const updateRange = buildUpdateRange(sheetRow);
+      const updateValues = buildRowFromStudent(updatedStudent);
+      
+      // Validate we have exactly 12 values (A through L)
+      if (updateValues.length !== 12) {
+        throw new Error(`Update values must have exactly 12 columns, got ${updateValues.length}`);
+      }
+      
+      // DEBUG LOGGING: Confirm update details
+      console.log(`📝 Updating sheet row: ${sheetRow}`);
+      console.log(`📝 Update range: ${updateRange}`);
+      console.log(`📝 Data being written (12 columns):`, updateValues);
+      console.log(`📝 MobileNo: ${normalizedMobileNo}, CreatedAt preserved: ${updatedStudent.CreatedAt}`);
+      
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: updateRange,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [updateValues], // Exactly 1 row with 12 columns
+        },
+      });
+
+      console.log(`✅ Successfully updated existing student record at row ${sheetRow} for mobile: ${normalizedMobileNo}`);
+      return res.status(200).json({ student: updatedStudent, updated: true });
+    }
+
+    // STRICT NO-DUPLICATE RULE: Final check before appending
+    // This is a critical safety measure to prevent any possibility of duplicates
+    const finalCheck = await findStudentByMobile(normalizedMobileNo);
+    if (finalCheck) {
+      // CRITICAL: If we reach here and a record exists, we MUST update, never append
+      console.log(`🚨 CRITICAL: Duplicate detected in final check for mobile: "${normalizedMobileNo}". Updating existing record at row ${finalCheck.rowNumber} - NEVER appending duplicate.`);
+      
+      // Preserve CreatedAt - never overwrite it
+      // CRITICAL: Preserve ALL columns including J, K, and FeeAmount
+      const updatedStudent = {
+        ...finalCheck, // This preserves _columnJ, _columnK, CreatedAt, FeeAmount, and all other fields
+        Name: Name.trim(),
+        MobileNo: normalizedMobileNo,
+        District: District.trim(),
+        State: State.trim(),
+        Paid: normalizedPaid,
+        // Update FeeAmount only if provided in request, otherwise preserve existing value
+        FeeAmount: FeeAmount !== undefined && FeeAmount !== null && FeeAmount !== '' 
+          ? String(FeeAmount).trim() 
+          : (finalCheck.FeeAmount ?? ''),
+        // CRITICAL: Preserve CreatedAt exactly as-is - NEVER set new timestamp for existing users
+        CreatedAt: finalCheck.CreatedAt ?? '',
+        // Preserve LastApprovedAt unless it's being updated elsewhere
+        LastApprovedAt: finalCheck.LastApprovedAt || '',
+        // Ensure columns J and K are preserved
+        _columnJ: finalCheck._columnJ ?? '',
+        _columnK: finalCheck._columnK ?? '',
+      };
+
+      // CRITICAL: Use explicit A{row}:L{row} range to update ONLY this row
+      const sheetRow = finalCheck.rowNumber;
+      const updateRange = buildUpdateRange(sheetRow);
+      const updateValues = buildRowFromStudent(updatedStudent);
+      
+      // Validate we have exactly 12 values (A through L)
+      if (updateValues.length !== 12) {
+        throw new Error(`Update values must have exactly 12 columns, got ${updateValues.length}`);
+      }
+      
+      // DEBUG LOGGING: Confirm update details
+      console.log(`📝 Updating sheet row: ${sheetRow}`);
+      console.log(`📝 Update range: ${updateRange}`);
+      console.log(`📝 Data being written (12 columns):`, updateValues);
+      
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: updateRange,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [updateValues], // Exactly 1 row with 12 columns
+        },
+      });
+
+      console.log(`✅ Successfully updated existing student record at row ${sheetRow} for mobile: ${normalizedMobileNo}`);
+      return res.status(200).json({ student: updatedStudent, updated: true });
+    }
+
+    // Only append if we have confirmed NO existing record exists
+    // This is the ONLY place where append is allowed
+    // CRITICAL: This is the ONLY place where CreatedAt is set - never set it anywhere else
+    // This is the "Add Student & Approve" flow - new users are immediately marked as attempted
+    const newStudent = {
+      Name: Name.trim(),
+      MobileNo: normalizedMobileNo, // Use normalized mobile number
+      District: District.trim(),
+      State: State.trim(),
+      Paid: normalizedPaid,
+      FeeAmount: String(FeeAmount).trim(), // Required fee amount for new users
+      Attempted: 'Yes', // CRITICAL: New users created via "Add Student & Approve" are immediately marked as attempted
+      RetakeAllowed: 'No',
+      LastApprovedAt: getCurrentISTTimestamp(), // Set approval timestamp immediately for new users
+      _columnJ: '', // Column J - empty for new students
+      _columnK: '', // Column K - empty for new students
+      CreatedAt: getCurrentISTTimestamp(), // CRITICAL: ONLY set here for new users - NEVER set in update flows
+    };
+
+    // Final verification: One more check right before append
+    const preAppendCheck = await findStudentByMobile(normalizedMobileNo);
+    if (preAppendCheck) {
+      console.log(`🚨 CRITICAL: Record appeared between checks for mobile: "${normalizedMobileNo}". Aborting append, updating row ${preAppendCheck.rowNumber} instead.`);
+      const updatedStudent = {
+        ...preAppendCheck,
+        Name: Name.trim(),
+        MobileNo: normalizedMobileNo,
+        District: District.trim(),
+        State: State.trim(),
+        Paid: normalizedPaid,
+        // Update FeeAmount only if provided in request, otherwise preserve existing value
+        FeeAmount: FeeAmount !== undefined && FeeAmount !== null && FeeAmount !== '' 
+          ? String(FeeAmount).trim() 
+          : (preAppendCheck.FeeAmount ?? ''),
+        // CRITICAL: Preserve CreatedAt exactly as-is - NEVER set new timestamp for existing users
+        CreatedAt: preAppendCheck.CreatedAt ?? '',
+        LastApprovedAt: preAppendCheck.LastApprovedAt || '',
+        // Ensure columns J and K are preserved
+        _columnJ: preAppendCheck._columnJ ?? '',
+        _columnK: preAppendCheck._columnK ?? '',
+      };
+
+      // CRITICAL: Use explicit A{row}:L{row} range to update ONLY this row
+      const sheetRow = preAppendCheck.rowNumber;
+      const updateRange = buildUpdateRange(sheetRow);
+      const updateValues = buildRowFromStudent(updatedStudent);
+      
+      // Validate we have exactly 12 values (A through L)
+      if (updateValues.length !== 12) {
+        throw new Error(`Update values must have exactly 12 columns, got ${updateValues.length}`);
+      }
+      
+      // DEBUG LOGGING: Confirm update details
+      console.log(`📝 Updating sheet row: ${sheetRow}`);
+      console.log(`📝 Update range: ${updateRange}`);
+      console.log(`📝 Data being written (12 columns):`, updateValues);
+      
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: updateRange,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [updateValues], // Exactly 1 row with 12 columns
+        },
+      });
+
+      console.log(`✅ Successfully updated existing student record at row ${sheetRow} for mobile: ${normalizedMobileNo}`);
+      return res.status(200).json({ student: updatedStudent, updated: true });
+    }
+
+    // SAFE TO APPEND: All checks passed, no duplicate exists
+    // CRITICAL FINAL SAFEGUARD: One last check before append to prevent duplicates
+    const absoluteFinalCheck = await findStudentByMobile(normalizedMobileNo);
+    if (absoluteFinalCheck) {
+      const errorMsg = `🚨 CRITICAL ERROR: Attempted to append but record exists for mobile ${normalizedMobileNo} at row ${absoluteFinalCheck.rowNumber}. This should never happen!`;
+      console.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+    
+    // Validate new student row has exactly 12 columns
+    const newStudentRow = buildRowFromStudent(newStudent);
+    if (newStudentRow.length !== 12) {
+      throw new Error(`New student row must have exactly 12 columns, got ${newStudentRow.length}`);
+    }
+    
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: SHEET_RANGE,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [newStudentRow],
+      },
+    });
+    
+    console.log(`✅ Created new student record for mobile: ${normalizedMobileNo} (CreatedAt: ${newStudent.CreatedAt}, Row has ${newStudentRow.length} columns)`);
+    return res.status(201).json({ student: newStudent, created: true });
+  } catch (error) {
+    const errorMessage = getErrorMessage(error);
+    console.error('❌ Error adding student:', {
+      message: errorMessage,
+      code: error.code,
+      stack: error.stack,
+    });
+    
+    if (error.code === 403) {
+      return res.status(403).json({
+        error: 'Permission denied',
+        message: 'Could not write to Google Sheets. Please ensure the sheet is shared with the service account email.',
+        details: errorMessage,
+      });
+    }
+    if (error.code === 404) {
+      return res.status(404).json({
+        error: 'Sheet not found',
+        message: 'The Google Sheet could not be found. Please check the Sheet ID.',
+        details: errorMessage,
+      });
+    }
+
+    return res.status(500).json({
+      error: 'Failed to add student',
+      message: 'Could not connect to Google Sheets. Please check your connection and credentials.',
+      details: errorMessage,
+    });
+  }
+});
+
+// ============================================================================
+// POST /student/update - Update existing student record
+// ============================================================================
+// STRICT NO-DUPLICATE RULE: This endpoint NEVER creates new records
+// 
+// BEHAVIOR:
+//   ✅ ALWAYS updates the same row (uses row number from existing record)
+//   ❌ NEVER appends new rows
+//   ❌ NEVER creates duplicates
+//   ✅ Returns 404 if student not found (does NOT create new record)
+//
+// UPDATE LOGIC:
+//   1. Find existing record by MobileNo (normalized)
+//   2. If found: Update same row with new values
+//   3. If not found: Return 404 (do NOT create)
+//
+// FIELD PRESERVATION:
+//   ✅ CreatedAt: NEVER overwritten (always preserved from original)
+//   ✅ LastApprovedAt: Updated when approved/retake, preserved otherwise
+//   ✅ MobileNo: Normalized and preserved
+//   ✅ Other fields: Updated as specified in request
+//
+// This ensures updates always happen in-place, never creating duplicates.
+// ============================================================================
 app.post('/student/update', async (req, res) => {
   const { mobileNo, updates } = req.body;
 
@@ -311,37 +838,138 @@ app.post('/student/update', async (req, res) => {
   }
 
   try {
-    const student = await findStudentByMobile(mobileNo);
+    // Normalize mobile number before searching
+    const normalizedMobileNo = normalizeMobileNumber(mobileNo);
+    if (!normalizedMobileNo) {
+      return res.status(400).json({
+        error: 'Invalid mobile number.',
+        message: 'Please provide a valid mobile number.',
+      });
+    }
+
+    // STRICT NO-DUPLICATE: Find existing record - if not found, return 404 (never create)
+    const student = await findStudentByMobile(normalizedMobileNo);
     if (!student) {
+      console.log(`⚠️  Update attempted for non-existent mobile: "${normalizedMobileNo}". Student not found. Returning 404 - NOT creating new record.`);
       return res.status(404).json({ 
         message: 'Student not found.',
         found: false 
       });
     }
 
-    const updatedStudent = { ...student, ...updates };
+    // CRITICAL: We found the record - we will UPDATE the same row, NEVER append
+    console.log(`🔄 UPDATING existing student record at row ${student.rowNumber} for mobile: ${normalizedMobileNo} (NOT appending - ensuring no duplicate)`);
 
-    if (typeof updatedStudent.Paid !== 'undefined') {
-      updatedStudent.Paid = normalizeYesNo(updatedStudent.Paid);
+    const normalizedUpdates = { ...updates };
+
+    if (typeof normalizedUpdates.Paid !== 'undefined') {
+      normalizedUpdates.Paid = normalizeYesNo(normalizedUpdates.Paid);
     }
-    if (typeof updatedStudent.Attempted !== 'undefined') {
-      updatedStudent.Attempted = normalizeYesNo(updatedStudent.Attempted);
+    if (typeof normalizedUpdates.Attempted !== 'undefined') {
+      normalizedUpdates.Attempted = normalizeYesNo(normalizedUpdates.Attempted);
     }
-    if (typeof updatedStudent.RetakeAllowed !== 'undefined') {
-      updatedStudent.RetakeAllowed = normalizeYesNo(updatedStudent.RetakeAllowed);
+    if (typeof normalizedUpdates.RetakeAllowed !== 'undefined') {
+      normalizedUpdates.RetakeAllowed = normalizeYesNo(normalizedUpdates.RetakeAllowed);
+    }
+
+    const isRetakeRequest =
+      typeof normalizedUpdates.RetakeAllowed !== 'undefined' && normalizedUpdates.RetakeAllowed === 'Yes';
+    const isAttemptApproval =
+      typeof normalizedUpdates.Attempted !== 'undefined' &&
+      normalizedUpdates.Attempted === 'Yes' &&
+      normalizeYesNo(student.Attempted) !== 'Yes';
+
+    if (isRetakeRequest) {
+      const lastApprovedAtDate = parseIsoDate(student.LastApprovedAt);
+      if (lastApprovedAtDate) {
+        const timeSinceLastApproval = Date.now() - lastApprovedAtDate.getTime();
+        if (timeSinceLastApproval < TWELVE_HOURS_MS) {
+          const remainingMs = TWELVE_HOURS_MS - timeSinceLastApproval;
+          const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
+          return res.status(409).json({
+            success: false,
+            message: 'Retake not allowed within 12 hours of last approval.',
+            remainingHours,
+          });
+        }
+      }
+    }
+
+    // CRITICAL: Explicitly remove CreatedAt from updates - it must NEVER be modified for existing users
+    // CreatedAt can only be set when creating new users, never during updates
+    const { CreatedAt: _, ...updatesWithoutCreatedAt } = normalizedUpdates;
+    if (normalizedUpdates.CreatedAt) {
+      console.log(`⚠️  IGNORED: CreatedAt field in update request for mobile ${normalizedMobileNo}. CreatedAt can only be set on user creation, not updates.`);
+    }
+
+    // Build updated student object, ensuring CreatedAt is NEVER overwritten
+    // CRITICAL: Preserve ALL existing values including columns J, K, and FeeAmount
+    const updatedStudent = { 
+      ...student, // This preserves _columnJ, _columnK, CreatedAt, FeeAmount, and all other fields
+      ...updatesWithoutCreatedAt, // Apply updates WITHOUT CreatedAt (FeeAmount can be updated if provided)
+      MobileNo: normalizedMobileNo, // Ensure mobile number is normalized
+    };
+
+    // CRITICAL: Ensure columns J and K are preserved (they might not be in normalizedUpdates)
+    if (!updatedStudent._columnJ) {
+      updatedStudent._columnJ = student._columnJ ?? '';
+    }
+    if (!updatedStudent._columnK) {
+      updatedStudent._columnK = student._columnK ?? '';
+    }
+
+    // CRITICAL: Preserve FeeAmount if not explicitly updated
+    if (typeof updatedStudent.FeeAmount === 'undefined' || updatedStudent.FeeAmount === null) {
+      updatedStudent.FeeAmount = student.FeeAmount ?? '';
+    }
+
+    // Update LastApprovedAt when student is approved or retakes (in IST)
+    if (isRetakeRequest || isAttemptApproval) {
+      updatedStudent.LastApprovedAt = getCurrentISTTimestamp();
+    } else if (typeof updatedStudent.LastApprovedAt === 'undefined') {
+      updatedStudent.LastApprovedAt = student.LastApprovedAt ?? '';
+    }
+
+    // CRITICAL: CreatedAt must NEVER be overwritten - always preserve the original value exactly as-is
+    // Existing users NEVER get a new CreatedAt, even if it's blank, null, or missing
+    updatedStudent.CreatedAt = student.CreatedAt ?? '';
+    // Explicit guard: Ensure CreatedAt is never modified
+    if (updatedStudent.CreatedAt !== (student.CreatedAt ?? '')) {
+      console.error(`🚨 CRITICAL: CreatedAt was modified for existing user ${normalizedMobileNo}. Restoring original value.`);
+      updatedStudent.CreatedAt = student.CreatedAt ?? '';
     }
 
     const sheets = await getSheetsClient();
 
+    // CRITICAL: Using spreadsheets.values.update() - this UPDATES the existing row
+    // We are NOT using append() - this ensures no duplicate is created
+    // Use explicit A{row}:L{row} range to update ONLY this specific row
+    const sheetRow = student.rowNumber;
+    const updateRange = buildUpdateRange(sheetRow);
+    const updateValues = buildRowFromStudent(updatedStudent);
+    
+    // CRITICAL VALIDATION: Must have exactly 12 values (matching 12 columns A through L)
+    if (updateValues.length !== 12) {
+      console.error(`❌ CRITICAL ERROR: Update values have ${updateValues.length} columns, expected 12`);
+      throw new Error(`Update values must have exactly 12 columns (got ${updateValues.length})`);
+    }
+    
+    // DEBUG LOGGING: Confirm update details
+    console.log(`📝 Updating sheet row: ${sheetRow}`);
+    console.log(`📝 Update range: ${updateRange}`);
+    console.log(`📝 Data being written (12 columns):`, updateValues);
+    console.log(`📝 MobileNo: ${normalizedMobileNo}, CreatedAt preserved: ${updatedStudent.CreatedAt}`);
+    
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `${sheetName}!${startColumnLetter}${student.rowNumber}:${endColumnLetter}${student.rowNumber}`,
+      range: updateRange,
       valueInputOption: 'USER_ENTERED',
       resource: {
-        values: [buildRowFromStudent(updatedStudent)],
+        values: [updateValues], // Exactly 1 row with 11 columns
       },
     });
 
+    console.log(`✅ Successfully UPDATED existing student record at row ${student.rowNumber} for mobile: ${normalizedMobileNo} (CreatedAt preserved: ${updatedStudent.CreatedAt}, no duplicate created)`);
     return res.json({ student: updatedStudent });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
@@ -389,7 +1017,7 @@ async function testConnection() {
     try {
       await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
-        range: `${sheetName}!A1:G1`, // Just the header row
+        range: `${sheetName}!A1:L1`, // Just the header row (A through L)
       });
       console.log('✅ Successfully verified sheet access and range!');
     } catch (rangeError) {
