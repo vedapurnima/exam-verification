@@ -38,8 +38,9 @@ type SuccessType = 'approve' | 'retake';
 type DashboardView = 'verification' | 'analytics';
 type UserCategoryFilter = 'all' | 'new' | 'existing' | 'retaken';
 
-// Use environment variable for production backend URL, or default to localhost for development
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4001';
+// Use environment variable for production backend URL, or default to production backend
+// For local development, set VITE_API_BASE_URL=http://localhost:4001 or http://10.10.10.52:4001
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://exam-verification-1.onrender.com';
 const SESSION_STORAGE_KEY = 'examVerificationSession';
 
 const STATE_DISTRICT_MAP: Record<string, string[]> = {

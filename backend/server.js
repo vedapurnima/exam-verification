@@ -11,33 +11,81 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 4001;
 
-// CORS configuration - allow frontend deployed on Vercel
+// CORS configuration - allow frontend deployed on Vercel and local network
+// Backend is deployed at: https://exam-verification-1.onrender.com
+// Frontend is deployed at: https://exam-verification.vercel.app
 const allowedOrigins = [
-  'https://exam-verification.vercel.app',
+  'https://exam-verification.vercel.app', // Vercel frontend (production)
+  'https://exam-verification.vercel.app/', // Vercel frontend with trailing slash
   'http://localhost:5173', // Vite dev server
   'http://localhost:3000',
   'http://localhost:4001',
-  '*', // Allow all origins for now (can be restricted later)
+  'http://10.10.10.52:5173', // WiFi IP for frontend
+  'http://10.10.10.52:4001', // WiFi IP for backend
 ];
 
-// demo test
+// CORS middleware with explicit configuration
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
+      // Allow requests with no origin (like mobile apps, Postman, or curl requests)
+      if (!origin) {
+        return callback(null, true);
+      }
       
-      if (allowedOrigins.indexOf(origin) !== -1) {
+      // Normalize origin (remove trailing slash for comparison)
+      const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin;
+      
+      // Check if origin is in allowed list
+      const isAllowed = allowedOrigins.some(allowed => {
+        const normalizedAllowed = allowed.endsWith('/') ? allowed.slice(0, -1) : allowed;
+        return normalizedOrigin === normalizedAllowed;
+      });
+      
+      if (isAllowed) {
         callback(null, true);
       } else {
-        callback(null, true); // Allow all origins for now (can be restricted later)
+        // Log for debugging but allow for now (can be restricted later)
+        console.log(`⚠️  CORS: Request from unlisted origin: ${origin}`);
+        callback(null, true);
       }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+      'Access-Control-Request-Method',
+      'Access-Control-Request-Headers',
+    ],
+    exposedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86400, // 24 hours
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   })
 );
+
+// Explicit OPTIONS handler for preflight requests (additional safety)
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400');
+  res.sendStatus(204);
+});
+
+// CORS logging middleware (for debugging - can be removed in production)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    console.log(`🔍 CORS Preflight: ${req.method} ${req.path} from origin: ${req.headers.origin || 'no origin'}`);
+  }
+  next();
+});
+
 app.use(express.json());
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1040,8 +1088,10 @@ async function testConnection() {
   }
 }
 
-const server = app.listen(port, async () => {
-  console.log(`\n🚀 Exam Verification API running on http://localhost:${port}\n`);
+const server = app.listen(port, '0.0.0.0', async () => {
+  console.log(`\n🚀 Exam Verification API running on:`);
+  console.log(`   Local:   http://localhost:${port}`);
+  console.log(`   Network: http://10.10.10.52:${port}\n`);
   await testConnection();
 });
 
