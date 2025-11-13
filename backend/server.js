@@ -16,9 +16,11 @@ const allowedOrigins = [
   'https://exam-verification.vercel.app',
   'http://localhost:5173', // Vite dev server
   'http://localhost:3000',
-  'http://localhost:4001', // Alternative dev port
+  'http://localhost:4001',
+  '*', // Allow all origins for now (can be restricted later)
 ];
 
+// demo test
 app.use(
   cors({
     origin: (origin, callback) => {
