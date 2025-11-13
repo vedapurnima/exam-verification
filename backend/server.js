@@ -106,7 +106,14 @@ const sheetName = sheetNamePart;
 // 1. GOOGLE_APPLICATION_CREDENTIALS environment variable (highest priority)
 // 2. Render secret files location (/etc/secrets/examCredits.json) for production
 // 3. App root directory (for Render secret files in root)
-// 4. Local development path (credentials.json or examCredits.json in backend directory)
+// 4. Local development path (examCredits.json or credentials.json in backend directory)
+
+// Log environment info for debugging
+console.log('🔍 Environment Info:');
+console.log(`   Current working directory: ${process.cwd()}`);
+console.log(`   Backend directory (__dirname): ${__dirname}`);
+console.log(`   GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS || 'not set'}`);
+
 let credentialsPath;
 if (GOOGLE_APPLICATION_CREDENTIALS) {
   credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
@@ -114,51 +121,84 @@ if (GOOGLE_APPLICATION_CREDENTIALS) {
 } else {
   // Check Render secret files location first (production - /etc/secrets/)
   const renderSecretPath = '/etc/secrets/examCredits.json';
+  console.log(`🔍 Checking Render secret file: ${renderSecretPath}`);
   if (fs.existsSync(renderSecretPath)) {
     credentialsPath = renderSecretPath;
-    console.log('📁 Using Render secret file from /etc/secrets/examCredits.json');
+    console.log('✅ Using Render secret file from /etc/secrets/examCredits.json');
   } else {
+    console.log(`❌ Render secret file not found at ${renderSecretPath}`);
+    
     // Check app root directory (Render can also place secret files in root)
     const rootPathExamCredits = path.join(process.cwd(), 'examCredits.json');
     const rootPathCredentials = path.join(process.cwd(), 'credentials.json');
+    console.log(`🔍 Checking app root: ${rootPathExamCredits}`);
+    console.log(`🔍 Checking app root (legacy): ${rootPathCredentials}`);
+    
     if (fs.existsSync(rootPathExamCredits)) {
       credentialsPath = rootPathExamCredits;
-      console.log('📁 Using credentials from app root directory (examCredits.json)');
+      console.log('✅ Using credentials from app root directory (examCredits.json)');
     } else if (fs.existsSync(rootPathCredentials)) {
       credentialsPath = rootPathCredentials;
-      console.log('📁 Using credentials from app root directory (credentials.json)');
+      console.log('✅ Using credentials from app root directory (credentials.json)');
     } else {
       // Fall back to local development path - check both filenames
       const localExamCredits = path.join(__dirname, 'examCredits.json');
       const localCredentials = path.join(__dirname, 'credentials.json');
+      console.log(`🔍 Checking backend directory: ${localExamCredits}`);
+      console.log(`🔍 Checking backend directory (legacy): ${localCredentials}`);
+      
       if (fs.existsSync(localExamCredits)) {
         credentialsPath = localExamCredits;
-        console.log('📁 Using local credentials file from backend directory (examCredits.json)');
+        console.log('✅ Using local credentials file from backend directory (examCredits.json)');
       } else if (fs.existsSync(localCredentials)) {
         credentialsPath = localCredentials;
-        console.log('📁 Using local credentials file from backend directory (credentials.json)');
+        console.log('✅ Using local credentials file from backend directory (credentials.json)');
       } else {
-        // Default to examCredits.json for new setups
-        credentialsPath = localExamCredits;
-        console.log('📁 Defaulting to examCredits.json (file not found yet)');
+        // For Render production, default to the Render secret path
+        // For local development, default to examCredits.json in backend
+        if (process.env.RENDER) {
+          // Running on Render - use Render secret path
+          credentialsPath = renderSecretPath;
+          console.log('⚠️  Running on Render but examCredits.json not found. Defaulting to /etc/secrets/examCredits.json');
+        } else {
+          // Local development - use backend directory
+          credentialsPath = localExamCredits;
+          console.log('⚠️  Local development: Defaulting to examCredits.json in backend directory');
+        }
       }
     }
   }
 }
 
+console.log(`📁 Final credentials path: ${credentialsPath}`);
+
 let initializationError = null;
 let serviceAccountEmail = '';
 
 if (!fs.existsSync(credentialsPath)) {
-  initializationError = new Error(
-    `Google service account credentials not found at ${credentialsPath}. ` +
-      'Ensure the examCredits.json file exists in Render Secret Files (/etc/secrets/examCredits.json) or set GOOGLE_APPLICATION_CREDENTIALS environment variable.'
-  );
+  const isRender = process.env.RENDER === 'true' || process.env.RENDER_EXTERNAL_URL;
+  const errorMessage = isRender
+    ? `Google service account credentials not found. ` +
+      `Expected file: /etc/secrets/examCredits.json (Render Secret Files). ` +
+      `Current path checked: ${credentialsPath}. ` +
+      `Please ensure examCredits.json is added in Render Dashboard > Secret Files.`
+    : `Google service account credentials not found at ${credentialsPath}. ` +
+      `Ensure examCredits.json exists in the backend directory or set GOOGLE_APPLICATION_CREDENTIALS environment variable.`;
+  
+  initializationError = new Error(errorMessage);
   console.error(`❌ ${initializationError.message}`);
-  console.error(`❌ Checked paths:`);
-  console.error(`   - /etc/secrets/examCredits.json (Render Secret Files)`);
-  console.error(`   - ${path.join(process.cwd(), 'examCredits.json')} (App root)`);
-  console.error(`   - ${path.join(__dirname, 'examCredits.json')} (Backend directory)`);
+  console.error(`❌ All checked paths:`);
+  console.error(`   1. /etc/secrets/examCredits.json (Render Secret Files) - ${fs.existsSync('/etc/secrets/examCredits.json') ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+  console.error(`   2. ${path.join(process.cwd(), 'examCredits.json')} (App root) - ${fs.existsSync(path.join(process.cwd(), 'examCredits.json')) ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+  console.error(`   3. ${path.join(__dirname, 'examCredits.json')} (Backend directory) - ${fs.existsSync(path.join(__dirname, 'examCredits.json')) ? '✅ EXISTS' : '❌ NOT FOUND'}`);
+  if (isRender) {
+    console.error(`\n📋 Render Setup Instructions:`);
+    console.error(`   1. Go to Render Dashboard > Your Service > Environment`);
+    console.error(`   2. Scroll to "Secret Files" section`);
+    console.error(`   3. Add file: examCredits.json`);
+    console.error(`   4. Paste your Google service account JSON content`);
+    console.error(`   5. Redeploy the service`);
+  }
 } else {
   try {
     const credentialsContent = fs.readFileSync(credentialsPath, 'utf8').trim();
