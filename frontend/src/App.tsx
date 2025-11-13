@@ -114,7 +114,6 @@ const toastMessages = {
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [authMobile, setAuthMobile] = useState<string | null>(null);
   const [loginStep, setLoginStep] = useState<'mobile' | 'otp'>('mobile');
   const [loginMobileInput, setLoginMobileInput] = useState('');
   const [loginOtpInput, setLoginOtpInput] = useState('');
@@ -160,7 +159,6 @@ export default function App() {
       const parsed = JSON.parse(storedSession) as { loggedIn?: boolean; mobile?: string };
       if (parsed?.loggedIn) {
         setIsAuthenticated(true);
-        setAuthMobile(parsed.mobile ?? null);
       }
     } catch (error) {
       console.error('Failed to parse session. Clearing stored session.', error);
@@ -253,7 +251,6 @@ export default function App() {
       window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionDetails));
     }
 
-    setAuthMobile(trimmedMobile);
     setIsAuthenticated(true);
     setLoginError('');
     setLoginStep('mobile');
@@ -272,7 +269,6 @@ export default function App() {
     }
     setShowProfileMenu(false);
     setIsAuthenticated(false);
-    setAuthMobile(null);
     setLoginStep('mobile');
     setLoginMobileInput('');
     setLoginOtpInput('');
@@ -1218,7 +1214,7 @@ export default function App() {
                     <div key={key} className="rounded-2xl border border-borderGray bg-beigePanel px-4 py-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-secondaryText inline-flex items-center gap-2">
                         {labels[key]}
-                        {(key === 'Paid' || key === 'Attempted') && getStatusDot(key, student[key] as YesNo)}
+                        {key === 'Attempted' && getStatusDot(key, student[key] as YesNo)}
                       </p>
                       <p className="mt-1 text-base font-medium text-primaryText">{student[key] || '—'}</p>
                     </div>
