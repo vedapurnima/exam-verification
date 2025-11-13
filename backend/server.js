@@ -102,9 +102,49 @@ const startColumnLetter = startColumnRaw.replace(/\d+/g, '') || 'A';
 const endColumnLetter = endColumnRaw.replace(/\d+/g, '') || 'L';
 const sheetName = sheetNamePart;
 
-const credentialsPath = GOOGLE_APPLICATION_CREDENTIALS
-  ? path.resolve(GOOGLE_APPLICATION_CREDENTIALS)
-  : path.join(__dirname, 'credentials.json');
+// Determine credentials path with priority:
+// 1. GOOGLE_APPLICATION_CREDENTIALS environment variable (highest priority)
+// 2. Render secret files location (/etc/secrets/examCredits.json) for production
+// 3. App root directory (for Render secret files in root)
+// 4. Local development path (credentials.json or examCredits.json in backend directory)
+let credentialsPath;
+if (GOOGLE_APPLICATION_CREDENTIALS) {
+  credentialsPath = path.resolve(GOOGLE_APPLICATION_CREDENTIALS);
+  console.log('📁 Using credentials from GOOGLE_APPLICATION_CREDENTIALS environment variable');
+} else {
+  // Check Render secret files location first (production - /etc/secrets/)
+  const renderSecretPath = '/etc/secrets/examCredits.json';
+  if (fs.existsSync(renderSecretPath)) {
+    credentialsPath = renderSecretPath;
+    console.log('📁 Using Render secret file from /etc/secrets/examCredits.json');
+  } else {
+    // Check app root directory (Render can also place secret files in root)
+    const rootPathExamCredits = path.join(process.cwd(), 'examCredits.json');
+    const rootPathCredentials = path.join(process.cwd(), 'credentials.json');
+    if (fs.existsSync(rootPathExamCredits)) {
+      credentialsPath = rootPathExamCredits;
+      console.log('📁 Using credentials from app root directory (examCredits.json)');
+    } else if (fs.existsSync(rootPathCredentials)) {
+      credentialsPath = rootPathCredentials;
+      console.log('📁 Using credentials from app root directory (credentials.json)');
+    } else {
+      // Fall back to local development path - check both filenames
+      const localExamCredits = path.join(__dirname, 'examCredits.json');
+      const localCredentials = path.join(__dirname, 'credentials.json');
+      if (fs.existsSync(localExamCredits)) {
+        credentialsPath = localExamCredits;
+        console.log('📁 Using local credentials file from backend directory (examCredits.json)');
+      } else if (fs.existsSync(localCredentials)) {
+        credentialsPath = localCredentials;
+        console.log('📁 Using local credentials file from backend directory (credentials.json)');
+      } else {
+        // Default to examCredits.json for new setups
+        credentialsPath = localExamCredits;
+        console.log('📁 Defaulting to examCredits.json (file not found yet)');
+      }
+    }
+  }
+}
 
 let initializationError = null;
 let serviceAccountEmail = '';
